@@ -97,7 +97,7 @@ log = logging.getLogger("len_norm_fast_grouped")
 
 # IMPORTANT: use only FILTERED π and capture orientation group (_0 = direct, _1 = inverted)
 _RE_PI = re.compile(
-    r">.*?filtered_pi.*?_chr_?([\w.\-]+)_start_(\d+)_end_(\d+)(?:_group_([01]))?",
+    r">filtered_pi.*?_chr_?([\w.\-]+)_start_(\d+)_end_(\d+)(?:_group_([01]))?",
     re.IGNORECASE,
 )
 _RE_HUD = re.compile(
@@ -113,7 +113,7 @@ def _norm_chr(s: str) -> str:
 
 def _parse_values_fast(line: str) -> np.ndarray:
     """Fast parser: replace 'NA' with 'nan' and use np.fromstring with sep=','."""
-    return np.fromstring(line.strip().replace("NA", "nan"), sep=",", dtype=np.float32)
+    return np.fromstring(line.strip().replace("NA", "nan"), sep=",", dtype=np.float64)
 
 # -------------------- INVERSION MAPPING --------------
 

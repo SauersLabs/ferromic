@@ -112,7 +112,7 @@ class WindowSpec:
         )
 
 
-TOTAL_WINDOW_LENGTHS = [20_000, 40_000, 60_000, 80_000, 100_000, 200_000]
+TOTAL_WINDOW_LENGTHS = [40_000]
 WINDOW_SPECS: List[WindowSpec] = []
 for total in TOTAL_WINDOW_LENGTHS:
     if total % 4 != 0:
@@ -134,7 +134,7 @@ def ensure_output_dir(spec: WindowSpec) -> Path:
 # ------------------------------------------------------------------------------
 # Other Constants & File Paths
 # ------------------------------------------------------------------------------
-PERMUTATIONS = 10_000
+PERMUTATIONS = 100_000
 
 PI_DATA_FILE = "per_site_diversity_output.falsta"
 INVERSION_FILE = "inv_properties.tsv"
@@ -225,10 +225,11 @@ def normalize_chromosome(chrom: str) -> Optional[str]:
 
 
 def extract_coordinates_from_header(header: str) -> Optional[dict]:
-    if "filtered_pi" not in header.lower():
+    lower_header = header.lower()
+    if not lower_header.startswith(">filtered_pi"):
         return None
     pattern = re.compile(
-        r">.*?filtered_pi.*?_chr_?([\w\.\-]+)_start_(\d+)_end_(\d+)(?:_group_([01]))?",
+        r">filtered_pi.*?_chr_?([\w\.\-]+)_start_(\d+)_end_(\d+)(?:_group_([01]))?",
         re.IGNORECASE,
     )
     match = pattern.search(header)
@@ -252,10 +253,15 @@ def extract_coordinates_from_header(header: str) -> Optional[dict]:
     return {"chrom": chrom, "start": start, "end": end, "group": group}
 
 
-def map_regions_to_inversions(inversion_df: pd.DataFrame) -> Tuple[dict, dict]:
-    logger.info("Creating inversion region mappings...")
-    recurrent_regions: Dict[str, List[Tuple[int, int]]] = {}
-    single_event_regions: Dict[str, List[Tuple[int, int]]] = {}
+def map_regions_to_inversions(inversion_df: pd.DataFrame) -> Dict[Tuple[str, int, int], dict]:
+    """
+    Build an exact-match lookup table for inversion regions.
+
+    Keys are normalized chromosome/start/end tuples pulled directly from
+    ``inv_properties.tsv``; values store the inversion ID and recurrence class.
+    """
+    logger.info("Creating inversion region mappings (exact coordinates)...")
+    exact_match_map: Dict[Tuple[str, int, int], dict] = {}
 
     inversion_df["Start"] = pd.to_numeric(inversion_df["Start"], errors="coerce")
     inversion_df["End"] = pd.to_numeric(inversion_df["End"], errors="coerce")
@@ -278,35 +284,15 @@ def map_regions_to_inversions(inversion_df: pd.DataFrame) -> Tuple[dict, dict]:
             continue
         start = int(row["Start"])
         end = int(row["End"])
+        inv_id = str(row.get("OrigID") or f"{chrom}:{start}-{end}")
         is_recurrent = int(row["0_single_1_recur_consensus"]) == 1
-        target = recurrent_regions if is_recurrent else single_event_regions
-        target.setdefault(chrom, []).append((start, end))
+        exact_match_map[(chrom, start, end)] = {
+            "inv_id": inv_id,
+            "inv_type": "recurrent" if is_recurrent else "single_event",
+        }
 
-    logger.info(
-        f"Mapped {sum(len(v) for v in recurrent_regions.values())} recurrent and "
-        f"{sum(len(v) for v in single_event_regions.values())} single-event regions."
-    )
-    return recurrent_regions, single_event_regions
-
-
-def is_overlapping(s1: int, e1: int, s2: int, e2: int) -> bool:
-    # Overlap / adjacency / <=1bp separation (inclusive coords)
-    return (e1 + 2) >= s2 and (e2 + 2) >= s1
-
-
-def determine_inversion_type(coords: dict, recurrent_regions: dict, single_event_regions: dict) -> str:
-    chrom, start, end = coords.get("chrom"), coords.get("start"), coords.get("end")
-    if not all([chrom, isinstance(start, int), isinstance(end, int)]):
-        return "unknown"
-    is_recur = any(is_overlapping(start, end, rs, re) for rs, re in recurrent_regions.get(chrom, []))
-    is_single = any(is_overlapping(start, end, rs, re) for rs, re in single_event_regions.get(chrom, []))
-    if is_recur and is_single:
-        return "ambiguous"
-    if is_recur:
-        return "recurrent"
-    if is_single:
-        return "single_event"
-    return "unknown"
+    logger.info(f"Mapped {len(exact_match_map)} inversion regions for exact lookup.")
+    return exact_match_map
 
 
 def paired_permutation_test(
@@ -326,14 +312,20 @@ def paired_permutation_test(
     obs = stat_func(diffs)
     if np.isclose(obs, 0):
         return 1.0
-    obs_abs = abs(obs)
 
     count = 0
-    for _ in range(num_permutations):
-        signs = np.random.choice([1, -1], size=n, replace=True)
-        perm = stat_func(diffs * signs)
-        if abs(perm) >= obs_abs:
-            count += 1
+    if obs > 0:
+        for _ in range(num_permutations):
+            signs = np.random.choice([1, -1], size=n, replace=True)
+            perm = stat_func(diffs * signs)
+            if perm >= obs:
+                count += 1
+    else:
+        for _ in range(num_permutations):
+            signs = np.random.choice([1, -1], size=n, replace=True)
+            perm = stat_func(diffs * signs)
+            if perm <= obs:
+                count += 1
     return count / num_permutations
 
 
@@ -360,7 +352,7 @@ def parse_pi_data_line(line: str) -> Optional[np.ndarray]:
 def load_pi_data(file_path: str | Path, min_total_length: int) -> List[dict]:
     logger.info(f"Loading pi data from {file_path}")
     logger.info(
-        f"Applying filters: Header must contain 'filtered_pi', Sequence length ≥ {min_total_length:,} (total)"
+        f"Applying filters: Header must start with 'filtered_pi', Sequence length ≥ {min_total_length:,} (total)"
     )
     start_time = time.time()
 
@@ -417,7 +409,8 @@ def load_pi_data(file_path: str | Path, min_total_length: int) -> List[dict]:
                     current_sequence_parts = []
                     is_current_header_valid = False
 
-                    if "filtered_pi" in current_header.lower():
+                    lower_header = current_header.lower()
+                    if lower_header.startswith(">filtered_pi"):
                         coords_check = extract_coordinates_from_header(current_header)
                         if coords_check:
                             is_current_header_valid = True
@@ -570,8 +563,8 @@ def calculate_flanking_stats(pi_sequences: List[dict], spec: WindowSpec) -> List
     return results
 
 
-def categorize_sequences(flanking_stats: List[dict], recurrent_regions: dict, single_event_regions: dict) -> dict:
-    logger.info("Categorizing sequences based on overlap with inversion regions...")
+def categorize_sequences(flanking_stats: List[dict], inversion_map: Dict[Tuple[str, int, int], dict]) -> dict:
+    logger.info("Categorizing sequences based on exact inversion coordinates...")
     categories = {
         "single_event": [],
         "recurrent": [],
@@ -581,10 +574,20 @@ def categorize_sequences(flanking_stats: List[dict], recurrent_regions: dict, si
         coords = seq_stats.get("coords")
         if not coords or "is_inverted" not in seq_stats:
             seq_stats["inv_class"] = "unknown"
+            seq_stats["inv_id"] = None
             continue
 
-        inv_type = determine_inversion_type(coords, recurrent_regions, single_event_regions)
+        inv_key = (coords.get("chrom"), coords.get("start"), coords.get("end"))
+        inv_info = inversion_map.get(inv_key)
+        if not inv_info:
+            seq_stats["inv_class"] = "unknown"
+            seq_stats["inv_id"] = None
+            continue
+
+        inv_type = inv_info["inv_type"]
+        inv_id = inv_info["inv_id"]
         seq_stats["inv_class"] = inv_type
+        seq_stats["inv_id"] = inv_id
 
         if inv_type == "single_event":
             categories["single_event"].append(seq_stats)
@@ -1202,7 +1205,7 @@ def main():
     except Exception as e:
         logger.error(f"Failed reading inversion file: {e}")
         return
-    recurrent_regions, single_event_regions = map_regions_to_inversions(inv_df)
+    inversion_map = map_regions_to_inversions(inv_df)
 
     pi_path = Path(PI_DATA_FILE)
     if not pi_path.is_file():
@@ -1232,9 +1235,7 @@ def main():
             )
             continue
 
-        categories = categorize_sequences(
-            flanking_stats, recurrent_regions, single_event_regions
-        )
+        categories = categorize_sequences(flanking_stats, inversion_map)
 
         filtered_flanking_stats: List[dict] = []
         for key in CATEGORY_KEYS:

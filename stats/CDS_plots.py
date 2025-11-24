@@ -750,38 +750,43 @@ def plot_proportion_identical_violin(cds_summary: pd.DataFrame, outfile: str):
                 # Try to place point
                 found = False
                 
-                # Special handling for y=1.0: 2 rows manually placed
+                # Special handling for y=1.0: up to 3 rows manually placed
                 if y_val >= 0.999:
-                    for y_row in range(2):  # Only 2 rows
-                        # Alternate row offset for hexagonal packing
-                        x_offset = (point_radius * 0.5) if (y_row % 2 == 1) else 0
-                        # Row 0 at exactly y=1.0, row 1 at y=1.0 + 0.5*radius
+                    for y_row in range(3):  # Up to 3 rows
+                        # Row 0 at exactly y=1.0
+                        # Row 1 at y=1.0 + 0.5*radius
+                        # Row 2 at y=1.0 + 1.0*radius
                         if y_row == 0:
                             y_test = y_val
-                        else:
+                        elif y_row == 1:
                             y_test = y_val + (point_radius * 0.5)
-                        
+                        else:
+                            y_test = y_val + (point_radius * 1.0)
+                
+                        # Alternate row offset for hexagonal packing
+                        x_offset = (point_radius * 0.5) if (y_row % 2 == 1) else 0
+                
                         for x_layer in range(100):
                             if x_layer == 0:
                                 x_candidates = [x_offset]
                             else:
                                 x_base = x_layer * point_radius
                                 x_candidates = [x_base + x_offset, -x_base + x_offset]
-                            
+                
                             for x_test in x_candidates:
                                 if abs(x_test) > swarm_width / 2:
                                     continue
-                                
+                
                                 if not collides(x_test, y_test):
                                     x_positions[idx] = x_test
                                     y_adjusted[idx] = y_test
                                     placed_points.append((x_test, y_test))
                                     found = True
                                     break
-                            
+                
                             if found:
                                 break
-                        
+                
                         if found:
                             break
                 else:
@@ -876,6 +881,7 @@ def plot_proportion_identical_violin(cds_summary: pd.DataFrame, outfile: str):
         leg.get_title().set_fontsize(8.5)
 
     # Size legend for number of CDS pairs
+    size_leg = None
     if max_pairs > 0:
         # choose 4 representative values spanning the observed range
         legend_pairs = np.linspace(min_pairs, max_pairs, 4)
@@ -902,6 +908,9 @@ def plot_proportion_identical_violin(cds_summary: pd.DataFrame, outfile: str):
         if size_leg and size_leg.get_title():
             size_leg.get_title().set_fontsize(8.5)
         ax.add_artist(size_leg)
+
+    # Re-attach the category legend after any additional legend calls
+    ax.add_artist(leg)
 
     fig.tight_layout()
     ensure_dir(outfile)
